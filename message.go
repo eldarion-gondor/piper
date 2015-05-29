@@ -3,6 +3,7 @@ package piper
 import (
 	"bytes"
 	"encoding/gob"
+	"io"
 )
 
 const (
@@ -11,6 +12,7 @@ const (
 	STDOUT
 	STDERR
 	STDIN
+	EOF
 )
 
 type Message struct {
@@ -19,10 +21,9 @@ type Message struct {
 	ExitCode uint32
 }
 
-func DecodeMessage(buf []byte) (*Message, error) {
-	mbuf := bytes.NewBuffer(buf)
+func DecodeMessage(r io.Reader) (*Message, error) {
 	m := new(Message)
-	dec := gob.NewDecoder(mbuf)
+	dec := gob.NewDecoder(r)
 	err := dec.Decode(m)
 	if err != nil {
 		return nil, err

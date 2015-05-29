@@ -1,6 +1,7 @@
 package piper
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/gorilla/websocket"
 	"github.com/kr/pty"
@@ -16,6 +18,13 @@ import (
 type Pipe struct {
 	conn *websocket.Conn
 	send chan []byte
+	opts Opts
+}
+
+type Opts struct {
+	Tty    bool `json:"tty"`
+	Width  int  `json:"width,omitempty"`
+	Height int  `json:"height,omitempty"`
 }
 
 type pipedCmd struct {
@@ -26,27 +35,50 @@ type pipedCmd struct {
 	stderr io.ReadCloser
 }
 
-func NewClientPipe(host string) (*Pipe, error) {
+type Winsize struct {
+	Height uint16
+	Width  uint16
+	x      uint16
+	y      uint16
+}
+
+func NewClientPipe(host string, opts Opts) (*Pipe, error) {
+	encoded, err := json.Marshal(opts)
+	if err != nil {
+		return nil, err
+	}
+	h := http.Header{}
+	h.Add("X-Pipe-Opts", string(encoded))
 	url := fmt.Sprintf("ws://%s", host)
-	conn, _, err := websocket.DefaultDialer.Dial(url, http.Header{})
+	conn, _, err := websocket.DefaultDialer.Dial(url, h)
 	if err != nil {
 		return nil, err
 	}
 	pipe := &Pipe{
 		conn: conn,
 		send: make(chan []byte),
+		opts: opts,
 	}
 	go pipe.writer()
 	return pipe, nil
 }
 
-func NewServerPipe(conn *websocket.Conn) *Pipe {
+func NewServerPipe(req *http.Request, conn *websocket.Conn) (*Pipe, error) {
+	xPipeOpts := req.Header.Get("X-Pipe-Opts")
+	if xPipeOpts == "" {
+		return nil, fmt.Errorf("missing X-Pipe-Opts")
+	}
+	var opts Opts
+	if err := json.Unmarshal([]byte(xPipeOpts), &opts); err != nil {
+		return nil, err
+	}
 	pipe := &Pipe{
 		conn: conn,
 		send: make(chan []byte),
+		opts: opts,
 	}
 	go pipe.writer()
-	return pipe
+	return pipe, nil
 }
 
 func (pipe *Pipe) writer() {
@@ -86,7 +118,20 @@ func (pipe *Pipe) sendExit(code uint32) {
 	pipe.send <- payload
 }
 
+func (pipe *Pipe) sendEOF() {
+	msg := Message{Kind: EOF}
+	payload, _ := msg.Prepare()
+	pipe.send <- payload
+}
+
 func (pipe *Pipe) RunCmd(cmd *exec.Cmd) error {
+	if pipe.opts.Tty {
+		return pipe.runPtyCmd(cmd)
+	}
+	return pipe.runStdCmd(cmd)
+}
+
+func (pipe *Pipe) runStdCmd(cmd *exec.Cmd) error {
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -99,6 +144,7 @@ func (pipe *Pipe) RunCmd(cmd *exec.Cmd) error {
 	if err != nil {
 		return err
 	}
+	fmt.Println("aaba")
 	pCmd := pipedCmd{
 		pipe:   pipe,
 		cmd:    cmd,
@@ -109,16 +155,27 @@ func (pipe *Pipe) RunCmd(cmd *exec.Cmd) error {
 	return pCmd.run()
 }
 
-func (pipe *Pipe) RunPtyCmd(cmd *exec.Cmd) error {
+func (pipe *Pipe) runPtyCmd(cmd *exec.Cmd) error {
 	py, tty, err := pty.Open()
 	if err != nil {
 		return err
 	}
 	defer tty.Close()
+	env := os.Environ()
+	env = append(env, "TERM=xterm")
+	cmd.Env = env
 	cmd.Stdout = tty
 	cmd.Stdin = tty
 	cmd.Stderr = tty
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setctty: true, Setsid: true}
+	ws := &Winsize{
+		Width:  uint16(pipe.opts.Width),
+		Height: uint16(pipe.opts.Height),
+	}
+	_, _, syserr := syscall.Syscall(syscall.SYS_IOCTL, py.Fd(), uintptr(syscall.TIOCSWINSZ), uintptr(unsafe.Pointer(ws)))
+	if syserr != 0 {
+		return syserr
+	}
 	pCmd := pipedCmd{
 		pipe:   pipe,
 		cmd:    cmd,
@@ -130,27 +187,29 @@ func (pipe *Pipe) RunPtyCmd(cmd *exec.Cmd) error {
 }
 
 func (pCmd *pipedCmd) run() error {
-	errc := make(chan error, 1)
-	go pCmd.pipe.copyTo(errc, pCmd.stdin, STDIN)
-	go pCmd.pipe.copyFrom(errc, pCmd.stdout, STDOUT)
+	defer close(pCmd.pipe.send)
+	go pCmd.pipe.copyFrom(pCmd.stdin, STDIN)
+	go pCmd.pipe.copyTo(pCmd.stdout, STDOUT)
 	if pCmd.stderr != nil {
-		go pCmd.pipe.copyFrom(errc, pCmd.stderr, STDERR)
+		go pCmd.pipe.copyTo(pCmd.stderr, STDERR)
 	}
 	if err := pCmd.cmd.Start(); err != nil {
 		pCmd.pipe.sendExit(uint32(1))
 		return err
 	}
-	if err := <-errc; err != nil {
-		pCmd.pipe.sendExit(uint32(1))
-		return err
+	waitErrCh := make(chan error)
+	go func() {
+		waitErrCh <- pCmd.cmd.Wait()
+	}()
+	select {
+	case err := <-waitErrCh:
+		status, err := pCmd.exitStatus(err)
+		if err != nil {
+			pCmd.pipe.sendExit(uint32(1))
+			return err
+		}
+		pCmd.pipe.sendExit(status)
 	}
-	status, err := pCmd.exitStatus(pCmd.cmd.Wait())
-	if err != nil {
-		pCmd.pipe.sendExit(uint32(1))
-		return err
-	}
-	pCmd.pipe.sendExit(status)
-	close(pCmd.pipe.send)
 	return nil
 }
 
@@ -166,36 +225,41 @@ func (pCmd *pipedCmd) exitStatus(err error) (uint32, error) {
 	return 0, nil
 }
 
-func (pipe *Pipe) copyTo(errc chan error, w io.Writer, kind int) {
+func (pipe *Pipe) copyFrom(w io.WriteCloser, kind int) error {
+	defer w.Close()
 	_, err := io.Copy(w, pipeIO{pipe: pipe, kind: kind})
-	if errc != nil {
-		errc <- err
+	if err != nil {
+		return err
 	}
+	return nil
 }
 
-func (pipe *Pipe) copyFrom(errc chan error, r io.Reader, kind int) {
+func (pipe *Pipe) copyTo(r io.Reader, kind int) error {
 	_, err := io.Copy(pipeIO{pipe: pipe, kind: kind}, r)
-	if errc != nil {
-		errc <- err
+	if err != nil {
+		return err
 	}
+	return nil
 }
 
 func (pipe *Pipe) Interact() (int, error) {
 	go func() {
-		_, err := io.Copy(pipeIO{pipe: pipe, kind: STDIN}, os.Stdin)
+		stdinPipe := pipeIO{pipe: pipe, kind: STDIN}
+		_, err := io.Copy(stdinPipe, os.Stdin)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
+		pipe.sendEOF()
 	}()
 	var exitCode int
 loop:
 	for {
-		_, p, err := pipe.conn.ReadMessage()
+		_, r, err := pipe.conn.NextReader()
 		if err != nil {
 			return 1, fmt.Errorf("reading message: %s", err)
 		}
-		m, err := DecodeMessage(p)
+		m, err := DecodeMessage(r)
 		if err != nil {
 			return 1, fmt.Errorf("decoding message: %s", err)
 		}
