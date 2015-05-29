@@ -3,183 +3,222 @@ package piper
 import (
 	"fmt"
 	"io"
-	"log"
-	"sync"
+	"net/http"
+	"os"
+	"os/exec"
+	"syscall"
 	"time"
 
-	"github.com/eldarion-gondor/piper/piperc"
-
 	"github.com/gorilla/websocket"
+	"github.com/kr/pty"
 )
 
-type pipeManager struct {
-	pipes map[string]*Pipe
-	mutex sync.RWMutex
-}
-
-var pm *pipeManager
-
-type connector struct {
-	label string
-	conn  *websocket.Conn
-	chIn  chan []byte
-	chOut chan []byte
-}
-
 type Pipe struct {
-	a       *connector
-	b       *connector
-	done    chan error
-	key     string
-	running bool
-	ready   bool
+	conn *websocket.Conn
+	send chan []byte
 }
 
-func init() {
-	pm = &pipeManager{
-		pipes: make(map[string]*Pipe),
-	}
+type pipedCmd struct {
+	pipe   *Pipe
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
 }
 
-func NewPipe(key string) *Pipe {
-	var pipe *Pipe
-	if _, ok := pm.pipes[key]; !ok {
-		pm.mutex.RLock()
-		pipe = &Pipe{
-			done: make(chan error, 2),
-			key:  key,
-		}
-		pm.pipes[key] = pipe
-		pm.mutex.RUnlock()
-	} else {
-		pipe = pm.pipes[key]
+func NewClientPipe(host string) (*Pipe, error) {
+	url := fmt.Sprintf("ws://%s", host)
+	conn, _, err := websocket.DefaultDialer.Dial(url, http.Header{})
+	if err != nil {
+		return nil, err
 	}
-	go pipe.Run()
+	pipe := &Pipe{
+		conn: conn,
+		send: make(chan []byte),
+	}
+	go pipe.writer()
+	return pipe, nil
+}
+
+func NewServerPipe(conn *websocket.Conn) *Pipe {
+	pipe := &Pipe{
+		conn: conn,
+		send: make(chan []byte),
+	}
+	go pipe.writer()
 	return pipe
 }
 
-func (pipe *Pipe) Run() {
-	if pipe.running {
-		return
-	}
-	pipe.running = true
-	log.Printf("[%s] start", pipe.key)
+func (pipe *Pipe) writer() {
+	ticker := time.NewTicker(((60 * time.Second) * 9) / 10)
 	defer func() {
-		log.Printf("[%s] stop", pipe.key)
-		delete(pm.pipes, pipe.key)
+		ticker.Stop()
+		pipe.conn.Close()
 	}()
-	var stopped int
+	write := func(mt int, payload []byte) error {
+		pipe.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return pipe.conn.WriteMessage(mt, payload)
+	}
 	for {
-		if pipe.a != nil && pipe.b != nil {
-			pipe.signalReady()
-			select {
-			case m := <-pipe.a.chIn:
-				pipe.b.chOut <- m
-			case m := <-pipe.b.chIn:
-				pipe.a.chOut <- m
-			case <-pipe.done:
-				if stopped++; stopped == 2 {
-					return
-				}
+		select {
+		case msg, ok := <-pipe.send:
+			if !ok {
+				write(websocket.CloseMessage, []byte{})
+				return
 			}
-		} else {
-			time.Sleep(50 * time.Millisecond)
+			if err := write(websocket.BinaryMessage, msg); err != nil {
+				return
+			}
+		case <-ticker.C:
+			if err := write(websocket.PingMessage, []byte{}); err != nil {
+				return
+			}
 		}
 	}
 }
 
-func (pipe *Pipe) signalReady() error {
-	if pipe.ready {
-		return nil
+func (pipe *Pipe) sendExit(code uint32) {
+	msg := Message{
+		Kind:     EXIT,
+		ExitCode: code,
 	}
-	pipe.ready = true
-	ready := &piperc.Message{Kind: piperc.READY}
-	m, err := ready.Prepare()
+	payload, _ := msg.Prepare()
+	pipe.send <- payload
+}
+
+func (pipe *Pipe) RunCmd(cmd *exec.Cmd) error {
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
 	}
-	pipe.a.conn.WriteMessage(websocket.BinaryMessage, m)
-	pipe.b.conn.WriteMessage(websocket.BinaryMessage, m)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	pCmd := pipedCmd{
+		pipe:   pipe,
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: stderr,
+	}
+	return pCmd.run()
+}
+
+func (pipe *Pipe) RunPtyCmd(cmd *exec.Cmd) error {
+	py, tty, err := pty.Open()
+	if err != nil {
+		return err
+	}
+	defer tty.Close()
+	cmd.Stdout = tty
+	cmd.Stdin = tty
+	cmd.Stderr = tty
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setctty: true, Setsid: true}
+	pCmd := pipedCmd{
+		pipe:   pipe,
+		cmd:    cmd,
+		stdin:  py,
+		stdout: py,
+		stderr: nil,
+	}
+	return pCmd.run()
+}
+
+func (pCmd *pipedCmd) run() error {
+	errc := make(chan error, 1)
+	go pCmd.pipe.copyTo(errc, pCmd.stdin, STDIN)
+	go pCmd.pipe.copyFrom(errc, pCmd.stdout, STDOUT)
+	if pCmd.stderr != nil {
+		go pCmd.pipe.copyFrom(errc, pCmd.stderr, STDERR)
+	}
+	if err := pCmd.cmd.Start(); err != nil {
+		pCmd.pipe.sendExit(uint32(1))
+		return err
+	}
+	if err := <-errc; err != nil {
+		pCmd.pipe.sendExit(uint32(1))
+		return err
+	}
+	status, err := pCmd.exitStatus(pCmd.cmd.Wait())
+	if err != nil {
+		pCmd.pipe.sendExit(uint32(1))
+		return err
+	}
+	pCmd.pipe.sendExit(status)
+	close(pCmd.pipe.send)
 	return nil
 }
 
-func (pipe *Pipe) copy(c *connector) {
-	defer func() {
-		close(c.chOut)
-		c.conn.Close()
-		pipe.done <- nil
+func (pCmd *pipedCmd) exitStatus(err error) (uint32, error) {
+	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
+				return uint32(status.ExitStatus()), nil
+			}
+		}
+		return 0, err
+	}
+	return 0, nil
+}
+
+func (pipe *Pipe) copyTo(errc chan error, w io.Writer, kind int) {
+	_, err := io.Copy(w, pipeIO{pipe: pipe, kind: kind})
+	if errc != nil {
+		errc <- err
+	}
+}
+
+func (pipe *Pipe) copyFrom(errc chan error, r io.Reader, kind int) {
+	_, err := io.Copy(pipeIO{pipe: pipe, kind: kind}, r)
+	if errc != nil {
+		errc <- err
+	}
+}
+
+func (pipe *Pipe) Interact() (int, error) {
+	go func() {
+		_, err := io.Copy(pipeIO{pipe: pipe, kind: STDIN}, os.Stdin)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 	}()
-	writer := func() {
-		ticker := time.NewTicker((60 * time.Second * 9) / 10)
-		defer ticker.Stop()
-		write := func(kind int, payload []byte) error {
-			c.conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
-			return c.conn.WriteMessage(kind, payload)
+	var exitCode int
+loop:
+	for {
+		_, p, err := pipe.conn.ReadMessage()
+		if err != nil {
+			return 1, fmt.Errorf("reading message: %s", err)
 		}
-		for {
-			select {
-			case m, ok := <-c.chOut:
-				if !ok {
-					write(websocket.CloseMessage, []byte{})
-					return
-				}
-				if err := write(websocket.BinaryMessage, m); err != nil {
-					return
-				}
-			case <-ticker.C:
-				if err := write(websocket.PingMessage, []byte{}); err != nil {
-					return
-				}
-			}
+		m, err := DecodeMessage(p)
+		if err != nil {
+			return 1, fmt.Errorf("decoding message: %s", err)
 		}
-	}
-	reader := func() {
-		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		c.conn.SetPongHandler(func(string) error {
-			log.Printf("[%s; %s] pong", pipe.key, c.label)
-			c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-			return nil
-		})
-		for {
-			_, m, err := c.conn.ReadMessage()
-			if err != nil {
-				if err != io.EOF {
-					log.Printf("[%s; %s] reader error: %s\n", pipe.key, c.label, err)
-				}
-				break
-			}
-			c.chIn <- m
+		switch m.Kind {
+		case STDOUT:
+			os.Stdout.Write(m.Payload)
+			break
+		case STDERR:
+			os.Stderr.Write(m.Payload)
+			break
+		case EXIT:
+			exitCode = int(m.ExitCode)
+			break loop
 		}
 	}
-	go writer()
-	reader()
+	pipe.Close("")
+	return exitCode, nil
 }
 
-func (pipe *Pipe) Copy(conn *websocket.Conn) error {
-	var c *connector
-	if pipe.a == nil {
-		log.Printf("[%s] setup connector A", pipe.key)
-		c = makeConnector(conn, "A")
-		pipe.a = c
-	} else {
-		if pipe.b == nil {
-			log.Printf("[%s] setup connector B", pipe.key)
-			c = makeConnector(conn, "B")
-			pipe.b = c
-		}
-	}
-	if c == nil {
-		return fmt.Errorf("pipe %q is full", pipe.key)
-	}
-	pipe.copy(c)
-	return nil
-}
-
-func makeConnector(conn *websocket.Conn, label string) *connector {
-	return &connector{
-		label: label,
-		conn:  conn,
-		chIn:  make(chan []byte),
-		chOut: make(chan []byte),
-	}
+func (pipe *Pipe) Close(msg string) {
+	pipe.conn.WriteMessage(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, msg),
+	)
+	pipe.conn.Close()
 }

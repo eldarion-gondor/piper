@@ -1,10 +1,8 @@
-package piperc
+package piper
 
 import (
 	"bytes"
 	"encoding/gob"
-
-	"github.com/gorilla/websocket"
 )
 
 const (
@@ -12,6 +10,7 @@ const (
 	EXIT
 	STDOUT
 	STDERR
+	STDIN
 )
 
 type Message struct {
@@ -31,22 +30,6 @@ func DecodeMessage(buf []byte) (*Message, error) {
 	return m, nil
 }
 
-func sendOutput(conn *websocket.Conn, kind int, payload []byte) error {
-	m := &Message{
-		Kind:    kind,
-		Payload: payload,
-	}
-	return m.Send(conn)
-}
-
-func sendExit(conn *websocket.Conn, code uint32) error {
-	m := &Message{
-		Kind:     EXIT,
-		ExitCode: code,
-	}
-	return m.Send(conn)
-}
-
 func (m *Message) Prepare() ([]byte, error) {
 	mbuf := new(bytes.Buffer)
 	enc := gob.NewEncoder(mbuf)
@@ -55,16 +38,4 @@ func (m *Message) Prepare() ([]byte, error) {
 		return nil, err
 	}
 	return mbuf.Bytes(), nil
-}
-
-func (m *Message) Send(conn *websocket.Conn) error {
-	txtMsg, err := m.Prepare()
-	if err != nil {
-		return err
-	}
-	err = conn.WriteMessage(websocket.BinaryMessage, txtMsg)
-	if err != nil {
-		return err
-	}
-	return nil
 }
