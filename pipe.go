@@ -144,7 +144,6 @@ func (pipe *Pipe) runStdCmd(cmd *exec.Cmd) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("aaba")
 	pCmd := pipedCmd{
 		pipe:   pipe,
 		cmd:    cmd,
