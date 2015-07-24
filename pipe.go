@@ -15,6 +15,17 @@ import (
 	"github.com/kr/pty"
 )
 
+const (
+	// time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// send pings to peer with this period. must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
+)
+
 type Pipe struct {
 	conn *websocket.Conn
 	send chan []byte
@@ -82,13 +93,13 @@ func NewServerPipe(req *http.Request, conn *websocket.Conn) (*Pipe, error) {
 }
 
 func (pipe *Pipe) writer() {
-	ticker := time.NewTicker(((60 * time.Second) * 9) / 10)
+	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
 		pipe.conn.Close()
 	}()
 	write := func(mt int, payload []byte) error {
-		pipe.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		pipe.conn.SetWriteDeadline(time.Now().Add(writeWait))
 		return pipe.conn.WriteMessage(mt, payload)
 	}
 	for {
@@ -252,6 +263,12 @@ func (pipe *Pipe) Interact() (int, error) {
 		pipe.sendEOF()
 	}()
 	var exitCode int
+	pongWait := 60 * time.Second
+	pipe.conn.SetReadDeadline(time.Now().Add(pongWait))
+	pipe.conn.SetPongHandler(func(string) error {
+		pipe.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
 loop:
 	for {
 		_, r, err := pipe.conn.NextReader()
