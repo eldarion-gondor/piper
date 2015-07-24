@@ -263,7 +263,6 @@ func (pipe *Pipe) Interact() (int, error) {
 		pipe.sendEOF()
 	}()
 	var exitCode int
-	pongWait := 60 * time.Second
 	pipe.conn.SetReadDeadline(time.Now().Add(pongWait))
 	pipe.conn.SetPongHandler(func(string) error {
 		pipe.conn.SetReadDeadline(time.Now().Add(pongWait))
