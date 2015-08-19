@@ -106,10 +106,12 @@ func (pipe *Pipe) runPtyCmd(cmd *exec.Cmd) error {
 
 func (pCmd *pipedCmd) run() error {
 	defer close(pCmd.pipe.send)
-	go pCmd.pipe.copyFrom(pCmd.stdin, STDIN)
-	go pCmd.pipe.copyTo(pCmd.stdout, STDOUT)
+	// read from the pipe and write to stdin of exec'd proccess
+	go pCmd.pipe.writeTo(pCmd.stdin, STDIN)
+	// read from stdout/stderr and write to the pipe
+	go pCmd.pipe.readFrom(pCmd.stdout, STDOUT)
 	if pCmd.stderr != nil {
-		go pCmd.pipe.copyTo(pCmd.stderr, STDERR)
+		go pCmd.pipe.readFrom(pCmd.stderr, STDERR)
 	}
 	if err := pCmd.cmd.Start(); err != nil {
 		pCmd.pipe.sendExit(uint32(1))

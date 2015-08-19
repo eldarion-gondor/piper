@@ -80,7 +80,7 @@ func (pipe *Pipe) sendEOF() {
 	pipe.send <- payload
 }
 
-func (pipe *Pipe) copyFrom(w io.WriteCloser, kind int) error {
+func (pipe *Pipe) writeTo(w io.WriteCloser, kind int) error {
 	defer w.Close()
 	_, err := io.Copy(w, pipeIO{pipe: pipe, kind: kind})
 	if err != nil {
@@ -89,7 +89,7 @@ func (pipe *Pipe) copyFrom(w io.WriteCloser, kind int) error {
 	return nil
 }
 
-func (pipe *Pipe) copyTo(r io.Reader, kind int) error {
+func (pipe *Pipe) readFrom(r io.Reader, kind int) error {
 	_, err := io.Copy(pipeIO{pipe: pipe, kind: kind}, r)
 	if err != nil {
 		return err
