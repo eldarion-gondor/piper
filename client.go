@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -11,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func NewClientPipe(host string, opts Opts) (*Pipe, error) {
+func NewClientPipe(host string, opts Opts, logger *log.Logger) (*Pipe, error) {
 	encoded, err := json.Marshal(opts)
 	if err != nil {
 		return nil, err
@@ -23,7 +24,7 @@ func NewClientPipe(host string, opts Opts) (*Pipe, error) {
 	if err != nil {
 		return nil, err
 	}
-	pipe := NewPipe(conn, opts)
+	pipe := NewPipe(conn, opts, logger)
 	return pipe, nil
 }
 
@@ -47,6 +48,9 @@ loop:
 	for {
 		_, r, err := pipe.conn.NextReader()
 		if err != nil {
+			if err == io.EOF {
+				return 1, fmt.Errorf("received EOF before exit code")
+			}
 			return 1, fmt.Errorf("reading message: %s", err)
 		}
 		m, err := DecodeMessage(r)

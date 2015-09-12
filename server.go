@@ -26,7 +26,7 @@ type pipedCmd struct {
 	stderr io.ReadCloser
 }
 
-func NewServerPipe(req *http.Request, conn *websocket.Conn) (*Pipe, error) {
+func NewServerPipe(req *http.Request, conn *websocket.Conn, logger *log.Logger) (*Pipe, error) {
 	xPipeOpts := req.Header.Get("X-Pipe-Opts")
 	if xPipeOpts == "" {
 		return nil, fmt.Errorf("missing X-Pipe-Opts")
@@ -35,7 +35,7 @@ func NewServerPipe(req *http.Request, conn *websocket.Conn) (*Pipe, error) {
 	if err := json.Unmarshal([]byte(xPipeOpts), &opts); err != nil {
 		return nil, err
 	}
-	pipe := NewPipe(conn, opts)
+	pipe := NewPipe(conn, opts, logger)
 	return pipe, nil
 }
 
@@ -118,7 +118,7 @@ func (pCmd *pipedCmd) run() error {
 	}
 	waitErrCh := make(chan error)
 	go func() {
-		log.Println("pipe: calling cmd.Wait")
+		pCmd.pipe.logger.Println("pipe: calling cmd.Wait")
 		waitErrCh <- pCmd.cmd.Wait()
 	}()
 	select {
@@ -128,7 +128,7 @@ func (pCmd *pipedCmd) run() error {
 			pCmd.pipe.sendExit(uint32(1))
 			return err
 		}
-		log.Printf("pipe: sending non-error exit (status=%d)", status)
+		pCmd.pipe.logger.Printf("pipe: sending non-error exit (status=%d)", status)
 		pCmd.pipe.sendExit(status)
 	}
 	return nil

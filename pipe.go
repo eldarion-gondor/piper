@@ -2,6 +2,7 @@ package piper
 
 import (
 	"io"
+	"io/ioutil"
 	"log"
 	"sync"
 	"time"
@@ -21,9 +22,10 @@ const (
 )
 
 type Pipe struct {
-	conn *websocket.Conn
-	send chan *syncPayload
-	opts Opts
+	conn   *websocket.Conn
+	send   chan *syncPayload
+	opts   Opts
+	logger *log.Logger
 }
 
 type Opts struct {
@@ -44,11 +46,15 @@ type syncPayload struct {
 	wg  sync.WaitGroup
 }
 
-func NewPipe(conn *websocket.Conn, opts Opts) *Pipe {
+func NewPipe(conn *websocket.Conn, opts Opts, logger *log.Logger) *Pipe {
+	if logger == nil {
+		logger = log.New(ioutil.Discard, "", 0)
+	}
 	pipe := &Pipe{
-		conn: conn,
-		send: make(chan *syncPayload),
-		opts: opts,
+		conn:   conn,
+		send:   make(chan *syncPayload),
+		opts:   opts,
+		logger: logger,
 	}
 	go pipe.writer()
 	return pipe
@@ -68,7 +74,7 @@ func (pipe *Pipe) writer() {
 		select {
 		case sp, ok := <-pipe.send:
 			if !ok {
-				log.Println("pipe: writing close message")
+				pipe.logger.Println("pipe: writing close message")
 				write(websocket.CloseMessage, []byte{})
 				return
 			}
@@ -78,7 +84,7 @@ func (pipe *Pipe) writer() {
 			}
 			sp.wg.Done()
 		case <-ticker.C:
-			log.Println("pipe: writing ping message")
+			pipe.logger.Println("pipe: writing ping message")
 			if err := write(websocket.PingMessage, []byte{}); err != nil {
 				return
 			}
@@ -99,14 +105,14 @@ func (pipe *Pipe) sendExit(code uint32) {
 		ExitCode: code,
 	}
 	payload, _ := msg.Prepare()
-	log.Printf("pipe: sending EXIT %#v", payload)
+	pipe.logger.Printf("pipe: sending EXIT %#v", payload)
 	pipe.Send(payload)
 }
 
 func (pipe *Pipe) sendEOF() {
 	msg := Message{Kind: EOF}
 	payload, _ := msg.Prepare()
-	log.Printf("pipe: sending EOF %#v", payload)
+	pipe.logger.Printf("pipe: sending EOF %#v", payload)
 	pipe.Send(payload)
 }
 
@@ -128,7 +134,7 @@ func (pipe *Pipe) readFrom(r io.Reader, kind int) error {
 }
 
 func (pipe *Pipe) Close(msg string) {
-	log.Printf("pipe: closing (msg=%q)", msg)
+	pipe.logger.Printf("pipe: closing (msg=%q)", msg)
 	pipe.conn.WriteMessage(
 		websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, msg),
