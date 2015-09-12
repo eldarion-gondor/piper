@@ -23,12 +23,7 @@ func NewClientPipe(host string, opts Opts) (*Pipe, error) {
 	if err != nil {
 		return nil, err
 	}
-	pipe := &Pipe{
-		conn: conn,
-		send: make(chan []byte),
-		opts: opts,
-	}
-	go pipe.writer()
+	pipe := NewPipe(conn, opts)
 	return pipe, nil
 }
 

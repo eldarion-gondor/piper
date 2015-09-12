@@ -16,7 +16,7 @@ func (pio pipeIO) Write(b []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	pio.pipe.send <- payload
+	pio.pipe.Send(payload)
 	return len(b), nil
 }
 

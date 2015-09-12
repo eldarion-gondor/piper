@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -34,12 +35,7 @@ func NewServerPipe(req *http.Request, conn *websocket.Conn) (*Pipe, error) {
 	if err := json.Unmarshal([]byte(xPipeOpts), &opts); err != nil {
 		return nil, err
 	}
-	pipe := &Pipe{
-		conn: conn,
-		send: make(chan []byte),
-		opts: opts,
-	}
-	go pipe.writer()
+	pipe := NewPipe(conn, opts)
 	return pipe, nil
 }
 
@@ -122,6 +118,7 @@ func (pCmd *pipedCmd) run() error {
 	}
 	waitErrCh := make(chan error)
 	go func() {
+		log.Println("pipe: calling cmd.Wait")
 		waitErrCh <- pCmd.cmd.Wait()
 	}()
 	select {
@@ -131,6 +128,7 @@ func (pCmd *pipedCmd) run() error {
 			pCmd.pipe.sendExit(uint32(1))
 			return err
 		}
+		log.Printf("pipe: sending non-error exit (status=%d)", status)
 		pCmd.pipe.sendExit(status)
 	}
 	return nil
