@@ -4,6 +4,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -41,16 +42,9 @@ type Winsize struct {
 }
 
 type syncPayload struct {
-	buf []byte
-	s   chan struct{}
-}
-
-func (sp *syncPayload) signal() {
-	<-sp.s
-}
-
-func (sp *syncPayload) wait() {
-	sp.s <- struct{}{}
+	*sync.Cond
+	sent *bool
+	buf  []byte
 }
 
 func NewPipe(conn *websocket.Conn, opts Opts, logger *log.Logger) *Pipe {
@@ -86,10 +80,12 @@ func (pipe *Pipe) writer() {
 				return
 			}
 			if err := write(websocket.BinaryMessage, sp.buf); err != nil {
-				sp.signal()
+				*sp.sent = false
+				sp.Signal()
 				return
 			}
-			sp.signal()
+			*sp.sent = true
+			sp.Signal()
 		case <-ticker.C:
 			pipe.logger.Println("pipe: writing ping message")
 			if err := write(websocket.PingMessage, []byte{}); err != nil {
@@ -100,9 +96,16 @@ func (pipe *Pipe) writer() {
 }
 
 func (pipe *Pipe) Send(payload []byte) {
-	sp := &syncPayload{buf: payload, s: make(chan struct{}, 1)}
+	sp := &syncPayload{
+		Cond: sync.NewCond(&sync.Mutex{}),
+		buf:  payload,
+	}
 	pipe.send <- sp
-	sp.wait()
+	sp.L.Lock()
+	for sp.sent == nil {
+		sp.Wait()
+	}
+	sp.L.Unlock()
 }
 
 func (pipe *Pipe) sendExit(code uint32) {
