@@ -1,6 +1,7 @@
 package piper
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,7 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func NewClientPipe(host string, opts Opts, logger *log.Logger) (*Pipe, error) {
+func NewClientPipe(host string, opts Opts, tlsConfig *tls.Config, logger *log.Logger) (*Pipe, error) {
 	encoded, err := json.Marshal(opts)
 	if err != nil {
 		return nil, err
@@ -20,7 +21,10 @@ func NewClientPipe(host string, opts Opts, logger *log.Logger) (*Pipe, error) {
 	h := http.Header{}
 	h.Add("X-Pipe-Opts", string(encoded))
 	url := fmt.Sprintf("ws://%s", host)
-	conn, _, err := websocket.DefaultDialer.Dial(url, h)
+	dialer := websocket.Dialer{
+		TLSClientConfig: tlsConfig,
+	}
+	conn, _, err := dialer.Dial(url, h)
 	if err != nil {
 		return nil, err
 	}
