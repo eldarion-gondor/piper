@@ -1,0 +1,4 @@
+package: github.com/eldarion-gondor/piper
+import:
+- package: github.com/gorilla/websocket
+- package: github.com/kr/pty

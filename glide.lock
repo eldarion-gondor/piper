@@ -1,0 +1,8 @@
+hash: 731cb1382e3226dd31d3bd731cdb8927f454e2e7b3d486cb15f96f5aa45670c9
+updated: 2016-05-29T12:55:48.024903742-06:00
+imports:
+- name: github.com/gorilla/websocket
+  version: afffb151969cb38ce452b0e1b8d20cd91fe7cd45
+- name: github.com/kr/pty
+  version: 0467868096dbfab4b683e41dd7aaba1c12363233
+devImports: []
